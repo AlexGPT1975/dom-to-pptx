@@ -111,6 +111,138 @@ function findAllByLocalName(doc, localName) {
   return Array.from(doc.getElementsByTagName('*')).filter((n) => n.localName === localName);
 }
 
+function directChildrenByLocalName(el, localName) {
+  return Array.from(el.childNodes).filter((n) => n.nodeType === 1 && n.localName === localName);
+}
+
+/** Path of the `.rels` part that owns `partPath` (e.g. "ppt/slideMasters/slideMaster1.xml" -> "ppt/slideMasters/_rels/slideMaster1.xml.rels"). */
+function relsPathFor(partPath) {
+  const slash = partPath.lastIndexOf('/');
+  const dir = partPath.slice(0, slash);
+  const fileName = partPath.slice(slash + 1);
+  return `${dir}/_rels/${fileName}.rels`;
+}
+
+/** Reads a `.rels` part (if present) into a Map of rId -> {type, target}. */
+async function readRelationshipMap(zip, relsPath) {
+  const file = zip.file(relsPath);
+  const map = new Map();
+  if (!file) return map;
+  const doc = parseXml(await file.async('string'), relsPath);
+  for (const rel of getRelationships(doc)) {
+    map.set(rel.getAttribute('Id'), { type: rel.getAttribute('Type'), target: rel.getAttribute('Target') });
+  }
+  return map;
+}
+
+/** Reads the single r:id attribute off an element, regardless of which prefix declared the relationships namespace. */
+function readRId(el) {
+  return el.getAttributeNS(R_NS, 'id') || el.getAttribute('r:id');
+}
+
+/**
+ * Resolves the slide layouts actually reachable from `presentation.xml`, in
+ * the order PowerPoint itself would present them: slide masters in
+ * `<p:sldMasterIdLst>` declaration order, each master's own layouts in its
+ * `<p:sldLayoutIdLst>` declaration order. Orphaned `slideLayoutN.xml` files
+ * that no master links to are never visited, so they can't affect layout
+ * selection. Any declared `r:id` that fails to resolve — a missing
+ * relationship entry or a relationship target that doesn't exist in the
+ * package — throws a descriptive error naming the part and the dangling id,
+ * since silently skipping it would make layout selection depend on
+ * whichever files happen to be well-linked.
+ */
+async function resolveDeclaredLayouts(zip, presDoc, presRelsMap) {
+  const sldMasterIdLst = findFirstByLocalName(presDoc, 'sldMasterIdLst');
+  if (!sldMasterIdLst) {
+    throw new Error(
+      'dom-to-pptx: template presentation.xml is missing <p:sldMasterIdLst>; this is not a valid PowerPoint package.'
+    );
+  }
+
+  const layouts = [];
+  for (const sldMasterId of directChildrenByLocalName(sldMasterIdLst, 'sldMasterId')) {
+    const masterRId = readRId(sldMasterId);
+    const masterRel = presRelsMap.get(masterRId);
+    if (!masterRel) {
+      throw new Error(
+        `dom-to-pptx: template presentation.xml declares slide master relationship "${masterRId}" which is missing ` +
+          'from ppt/_rels/presentation.xml.rels. Is this a valid PowerPoint file?'
+      );
+    }
+    const masterPath = resolveRelativeTarget('ppt', masterRel.target);
+    const masterFile = zip.file(masterPath);
+    if (!masterFile) {
+      throw new Error(
+        `dom-to-pptx: template declares slide master "${masterPath}" in presentation.xml, but that part is missing ` +
+          'from the package.'
+      );
+    }
+    const masterDoc = parseXml(await masterFile.async('string'), masterPath);
+    const masterDir = masterPath.slice(0, masterPath.lastIndexOf('/'));
+    const masterRelsMap = await readRelationshipMap(zip, relsPathFor(masterPath));
+
+    const sldLayoutIdLst = findFirstByLocalName(masterDoc, 'sldLayoutIdLst');
+    if (!sldLayoutIdLst) continue; // a master with no layouts declared is unusual but not fatal
+
+    for (const sldLayoutId of directChildrenByLocalName(sldLayoutIdLst, 'sldLayoutId')) {
+      const layoutRId = readRId(sldLayoutId);
+      const layoutRel = masterRelsMap.get(layoutRId);
+      if (!layoutRel) {
+        throw new Error(
+          `dom-to-pptx: template "${masterPath}" declares slide layout relationship "${layoutRId}" which is ` +
+            `missing from ${relsPathFor(masterPath)}. Is this a valid PowerPoint file?`
+        );
+      }
+      const layoutPath = resolveRelativeTarget(masterDir, layoutRel.target);
+      const layoutFile = zip.file(layoutPath);
+      if (!layoutFile) {
+        throw new Error(
+          `dom-to-pptx: template declares slide layout "${layoutPath}" in "${masterPath}", but that part is ` +
+            'missing from the package.'
+        );
+      }
+      const layoutDoc = parseXml(await layoutFile.async('string'), layoutPath);
+      const cSld = directChildrenByLocalName(layoutDoc.documentElement, 'cSld')[0];
+      const name = cSld ? cSld.getAttribute('name') || '' : '';
+      layouts.push({ name, id: layoutPath });
+    }
+  }
+
+  return layouts;
+}
+
+/**
+ * Resolves the notes master part actually referenced by `presentation.xml`'s
+ * `<p:notesMasterIdLst>`, rather than assuming the numerically-first
+ * `notesMasterN.xml` file. Returns `null` when the template declares no
+ * notes master at all (some templates have none); throws when one is
+ * declared but its relationship can't be resolved.
+ */
+function resolveDeclaredNotesMaster(zip, presDoc, presRelsMap) {
+  const notesMasterIdLst = findFirstByLocalName(presDoc, 'notesMasterIdLst');
+  if (!notesMasterIdLst) return null;
+  const notesMasterId = directChildrenByLocalName(notesMasterIdLst, 'notesMasterId')[0];
+  if (!notesMasterId) return null;
+
+  const rId = readRId(notesMasterId);
+  const rel = presRelsMap.get(rId);
+  if (!rel) {
+    throw new Error(
+      `dom-to-pptx: template presentation.xml declares notes master relationship "${rId}" which is missing from ` +
+        'ppt/_rels/presentation.xml.rels. Is this a valid PowerPoint file?'
+    );
+  }
+  const notesMasterPath = resolveRelativeTarget('ppt', rel.target);
+  if (!zip.file(notesMasterPath)) {
+    throw new Error(
+      `dom-to-pptx: template declares notes master "${notesMasterPath}" in presentation.xml, but that part is ` +
+        'missing from the package.'
+    );
+  }
+  return notesMasterPath;
+}
+
 function numberedParts(zip, regex) {
   return Object.keys(zip.files)
     .map((p) => {
@@ -186,42 +318,32 @@ function relativeTarget(fromDir, toPath) {
 export async function readTemplate(source) {
   const zip = await loadZipFromSource(source);
 
-  const layoutParts = numberedParts(zip, /^ppt\/slideLayouts\/slideLayout(\d+)\.xml$/);
-  if (layoutParts.length === 0) {
+  const presFile = zip.file(PRESENTATION_PATH);
+  if (!presFile) {
     throw new Error(
-      'dom-to-pptx: the provided `template` does not contain any PowerPoint slide layouts ' +
-        '(ppt/slideLayouts/*.xml). Is this a valid .pptx file?'
+      'dom-to-pptx: the provided `template` does not contain ppt/presentation.xml. Is this a valid .pptx file?'
+    );
+  }
+  const presDoc = parseXml(await presFile.async('string'), PRESENTATION_PATH);
+  const presRelsMap = await readRelationshipMap(zip, PRESENTATION_RELS_PATH);
+
+  const layouts = await resolveDeclaredLayouts(zip, presDoc, presRelsMap);
+  if (layouts.length === 0) {
+    throw new Error(
+      'dom-to-pptx: the provided `template` does not declare any reachable PowerPoint slide layouts ' +
+        '(via presentation.xml -> slide master(s) -> sldLayoutIdLst). Is this a valid .pptx file?'
     );
   }
 
-  const layouts = [];
-  for (const part of layoutParts) {
-    const xmlStr = await zip.file(part.path).async('string');
-    const doc = parseXml(xmlStr, part.path);
-    const sldLayout = doc.documentElement;
-    // The layout's own name lives on the top-level <p:cSld name="...">,
-    // one level below <p:sldLayout>. Shapes inside the layout also carry
-    // `name` attributes (on <p:cNvPr>), so we must not just grab the
-    // first `name` attribute found anywhere in the document.
-    const cSld = Array.from(sldLayout.childNodes).find((n) => n.nodeType === 1 && n.localName === 'cSld');
-    const name = cSld ? cSld.getAttribute('name') || '' : '';
-    layouts.push({ name, id: part.path });
-  }
-
-  const notesMasterParts = numberedParts(zip, /^ppt\/notesMasters\/notesMaster(\d+)\.xml$/);
-  const notesMasterId = notesMasterParts.length > 0 ? notesMasterParts[0].path : null;
+  const notesMasterId = resolveDeclaredNotesMaster(zip, presDoc, presRelsMap);
 
   let sldSz = null;
-  const presFile = zip.file(PRESENTATION_PATH);
-  if (presFile) {
-    const presDoc = parseXml(await presFile.async('string'), PRESENTATION_PATH);
-    const sldSzEl = findFirstByLocalName(presDoc, 'sldSz');
-    if (sldSzEl) {
-      const cx = parseInt(sldSzEl.getAttribute('cx'), 10);
-      const cy = parseInt(sldSzEl.getAttribute('cy'), 10);
-      if (!isNaN(cx) && !isNaN(cy)) {
-        sldSz = { width: cx / EMU_PER_INCH, height: cy / EMU_PER_INCH };
-      }
+  const sldSzEl = findFirstByLocalName(presDoc, 'sldSz');
+  if (sldSzEl) {
+    const cx = parseInt(sldSzEl.getAttribute('cx'), 10);
+    const cy = parseInt(sldSzEl.getAttribute('cy'), 10);
+    if (!isNaN(cx) && !isNaN(cy)) {
+      sldSz = { width: cx / EMU_PER_INCH, height: cy / EMU_PER_INCH };
     }
   }
 

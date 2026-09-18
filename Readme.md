@@ -461,7 +461,7 @@ Returns: `Promise<Blob>` - Resolves with the generated PPTX file data (Blob).
 | `template`          | `string` \| `ArrayBuffer` \| `Uint8Array` \| `Blob` | `undefined`             | Base the export on an existing `.pptx` so slides inherit its real slideLayout/master background. See [Template Support](docs/template-support.md). |
 | `defaultBaseLayout` | `string`                                            | template's first layout | Layout name (from `template`) used for any slide that doesn't set its own `baseLayout`.                                                            |
 
-> Note: animations and transitions are controlled entirely through CSS classes on your elements (see [Animated Slides & Transitions](#6-animated-slides--transitions-new-in-v120)), not through the `options` object.
+> Note: animations and transitions are controlled entirely through CSS classes on your elements (see [Animated Slides & Transitions](#6-animated-slides--transitions-new-in-v200)), not through the `options` object.
 
 **List Configuration Example:**
 

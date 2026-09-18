@@ -24,13 +24,15 @@ template given?
 
 `mergeTemplate` is a small, generic OOXML adapter built directly on `jszip` (already a dependency). It:
 
-- Loads the template `.pptx` and treats it as the base package: `ppt/theme/`, `ppt/slideMasters/`, `ppt/slideLayouts/`, `ppt/media/`, `ppt/presentation.xml`, `ppt/_rels/presentation.xml.rels`, `[Content_Types].xml`, and any existing slides are preserved byte-for-byte except where noted below.
+- Loads the template `.pptx` and treats it as the base package. Two different guarantees apply to it, depending on the part:
+  - **Preserved byte-for-byte, never touched at all:** `ppt/theme/`, `ppt/slideMasters/`, `ppt/slideLayouts/`, `ppt/media/`, and any of the template's own existing slides/notes pages/relationships.
+  - **Edited to add new entries, but never rewritten wholesale:** the three "central" package-level files — `ppt/presentation.xml`, `ppt/_rels/presentation.xml.rels`, and `[Content_Types].xml` — gain the specific new nodes a merge requires (new `<p:sldId>`s, new relationships, new `<Override>`s; see below), via targeted DOM manipulation, with every pre-existing node left exactly as it was.
 - Copies each newly generated `ppt/slides/slideN.xml`, its `ppt/notesSlides/notesSlideN.xml` (dom-to-pptx/PptxGenJS always creates one per slide), and any images it references, into the template package under fresh, non-colliding numbers.
-- Rewrites exactly **one** relationship per copied slide: its `slideLayout` relationship, from PptxGenJS's own generated blank layout to the real layout resolved from the template (by name — see below). Everything else in the slide (shapes, text, colors, images) is untouched, because dom-to-pptx always writes explicit RGB values rather than theme-scheme colors, so swapping the parent layout never changes how existing shapes render.
+- Rewrites each copied slide's `slideLayout` relationship, from PptxGenJS's own generated blank layout to the real layout resolved from the template (by name — see below). The slide's own content (shapes, text, colors) is untouched, because dom-to-pptx always writes explicit RGB values rather than theme-scheme colors, so swapping the parent layout never changes how existing shapes render. Two other relationships are also adjusted whenever the new part names above require it: the slide's `notesSlide` relationship (repointed at the copied, renumbered notes page) and any `image` relationships on the slide (repointed at the copied, renumbered media file) — so the total number of relationships rewritten per slide depends on how many images it contains, not a fixed count.
 - Appends the new slides to `ppt/presentation.xml`'s `<p:sldIdLst>` and to `ppt/_rels/presentation.xml.rels`, and adds the corresponding `[Content_Types].xml` `<Override>` entries.
 - If fonts were requested, merges them into the template's own `<p:embeddedFontLst>` (see **Font embedding** below).
 
-No existing part of the template is rewritten wholesale; only the specific nodes above are added or edited via DOM manipulation (`DOMParser`/`XMLSerializer`, the same approach `pptx-normalizer.js` already uses elsewhere in this codebase).
+All of the above is done via targeted DOM manipulation (`DOMParser`/`XMLSerializer`, the same approach `pptx-normalizer.js` already uses elsewhere in this codebase) — never a wholesale rewrite of an existing part.
 
 ## Font embedding
 
@@ -95,7 +97,11 @@ When `template` is set and the caller didn't pass an explicit `width`/`height` (
 ## Default layout (no `baseLayout` given)
 
 1. `options.defaultBaseLayout`, if set.
-2. Otherwise, the template's **first declared layout** (the first `<p:sldLayoutId>` in `slideMaster1.xml`'s `sldLayoutIdLst` — i.e. the first `slideLayoutN.xml` file, in numeric order). Deterministic and documented, not a content-based heuristic.
+2. Otherwise, the template's **first declared layout**. "First declared" follows the actual OOXML relationships PowerPoint itself would follow — `presentation.xml`'s `<p:sldMasterIdLst>` order, then that master's own `<p:sldLayoutIdLst>` order, each `r:id` resolved through the real `.rels` files — **not** `slideLayoutN.xml` file-name numbering, which real templates (re-saved by PowerPoint many times) don't reliably keep in sync with declaration order. A `slideLayoutN.xml` file that no master links to (an orphan) is never considered. This is deterministic and documented, not a content-based heuristic.
+
+## Notes master
+
+New notes pages link to the notes master `presentation.xml` actually declares — resolved via its `<p:notesMasterIdLst>` and the corresponding relationship in `ppt/_rels/presentation.xml.rels` — never simply the numerically-first `notesMasterN.xml` file in the package. A template with an orphaned, unreferenced `notesMaster1.xml` alongside the real, declared `notesMaster7.xml` links new notes pages to `notesMaster7.xml`.
 
 ## Error handling
 
@@ -117,7 +123,7 @@ The CLI selects slides purely by CSS selector, so it has no way to assign a _dif
 
 ## Known limitations
 
-- The template's existing slides (if it has any) are left in place; new slides are always appended after them. If you hand in a template that already contains real content slides, they'll still be there in the output.
-- Layout names must match exactly (case-sensitive) and should be unique within the template; if two layouts share a name, the first one (in file order) wins.
+- The template's existing slides (if it has any) are left in place — including their own notes pages, referenced images, and relationships — byte-for-byte; new slides are always appended after them, with fresh part names/ids allocated past whatever the template already uses (including gaps or unusually high existing numbers). If you hand in a template that already contains real content slides, they'll still be there, unmodified, in the output.
+- Layout names must match exactly (case-sensitive) and should be unique within the template; if two layouts share a name, the first one **declared** (via `<p:sldMasterIdLst>`/`<p:sldLayoutIdLst>` order, resolved through the real relationships — see "Default layout" above) wins, not the first one by file name.
 - Embedded-font deduplication is keyed on the exact `(typeface name, variant)` pair. If the template already embeds "Corporate Font" Regular under that exact family name, a newly requested "Corporate Font" Regular is recognized as the same font and not re-embedded; a font declared under a different CSS family name (even if visually identical) is treated as distinct, same as PowerPoint itself would.
 - This feature does not validate the template against the full OOXML schema — a template produced by PowerPoint itself (the overwhelmingly common case) works; a hand-crafted or otherwise unusual package might not.

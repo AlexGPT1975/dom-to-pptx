@@ -59,8 +59,8 @@ const PX_TO_INCH = 1 / PPI;
  *   as the base presentation. When set, exported slides inherit a real PowerPoint slide
  *   layout/master background (see `baseLayout` below) instead of a blank generated one.
  *   Accepts a URL string (fetched with `fetch`) or raw bytes (ArrayBuffer/Uint8Array/Blob).
- *   See docs/template-support.md for details and limitations (e.g. font embedding is not
- *   currently supported together with `template`).
+ *   Embedded fonts (`options.fonts` / automatic `@font-face` detection) are fully supported
+ *   together with `template` — see docs/template-support.md for details and limitations.
  * @param {string} [options.defaultBaseLayout] - Layout name used for slides that don't
  *   specify their own `baseLayout`. Falls back to the template's first declared layout
  *   if omitted.

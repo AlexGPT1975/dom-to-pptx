@@ -45,10 +45,12 @@ const APP_XML = `${XML_DECL}<Properties xmlns="http://schemas.openxmlformats.org
 <Application>dom-to-pptx test fixture</Application>
 </Properties>`;
 
+// Child order follows CT_Presentation (ECMA-376 §19.2.1.26):
+// sldMasterIdLst, notesMasterIdLst, handoutMasterIdLst, sldIdLst, sldSz, notesSz, ...
 const PRESENTATION_XML = `${XML_DECL}<p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
 <p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst>
-<p:sldIdLst/>
 <p:notesMasterIdLst><p:notesMasterId r:id="rId2"/></p:notesMasterIdLst>
+<p:sldIdLst/>
 <p:sldSz cx="12192000" cy="6858000"/>
 <p:notesSz cx="6858000" cy="12192000"/>
 </p:presentation>`;
@@ -219,3 +221,125 @@ export async function buildTemplateFixture() {
 
 export const FIXTURE_LAYOUT_NAMES = ['Content Light', 'Section Dark'];
 export const FIXTURE_SLDSZ_IN = { width: 12192000 / 914400, height: 6858000 / 914400 };
+
+// --- "Existing content" variant --------------------------------------------
+//
+// The plain fixture above (no pre-existing slides) is enough to prove a
+// merge *can* attach new content to a template, but it can't prove the
+// merge *preserves* what a real corporate template already contains: real
+// customer templates arrive with their own content slides, notes, images,
+// and — because they've been resaved by PowerPoint many times — numbering
+// gaps and high existing ids/rIds rather than a clean 1-based sequence.
+// buildTemplateFixtureWithExistingContent() adds exactly that on top of the
+// same master/theme/layouts:
+//   - one existing content slide (deliberately numbered slide5.xml, not
+//     slide1.xml, to simulate a numbering gap)
+//   - its own existing notes page (notesSlide8.xml) and referenced image
+//     (media/image9.png)
+//   - a deliberately high existing <p:sldId id="9999" .../> and rId
+//     (rId20) in presentation.xml / its rels, so new slides must be
+//     allocated ids/rIds that don't collide with either the low end
+//     (rId1..rId6, already used by the master/theme/etc.) or this high one.
+const EXISTING_SLIDE_XML = `${XML_DECL}<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+<p:cSld name="Existing Content Slide">
+<p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+<p:grpSpPr/>
+<p:sp>
+<p:nvSpPr><p:cNvPr id="2" name="Existing Title"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="457200" y="274638"/><a:ext cx="4351338" cy="1143000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+<p:txBody><a:bodyPr/><a:p><a:r><a:t>Existing Slide Content</a:t></a:r></a:p></p:txBody>
+</p:sp>
+<p:pic>
+<p:nvPicPr><p:cNvPr id="3" name="Existing Picture"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+<p:blipFill><a:blip r:embed="rId3"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>
+<p:spPr><a:xfrm><a:off x="6000000" y="500000"/><a:ext cx="914400" cy="914400"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+</p:pic>
+</p:spTree>
+</p:cSld>
+</p:sld>`;
+
+const EXISTING_SLIDE_RELS = `${XML_DECL}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide8.xml"/>
+<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image9.png"/>
+</Relationships>`;
+
+const EXISTING_NOTES_SLIDE_XML = `${XML_DECL}<p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+<p:cSld><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+<p:grpSpPr/>
+<p:sp><p:nvSpPr><p:cNvPr id="2" name="Notes Placeholder"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>Existing speaker notes for slide five.</a:t></a:r></a:p></p:txBody></p:sp>
+</p:spTree></p:cSld>
+</p:notes>`;
+
+const EXISTING_NOTES_SLIDE_RELS = `${XML_DECL}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster" Target="../notesMasters/notesMaster1.xml"/>
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="../slides/slide5.xml"/>
+</Relationships>`;
+
+// Not a decodable PNG (irrelevant here — the merge never inspects existing
+// media bytes, only copies/preserves them), but starts with the real PNG
+// magic number so it "looks like" a media file if anyone inspects the zip.
+const EXISTING_IMAGE_BYTES = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+
+export const EXISTING_CONTENT = {
+  slideId: '9999',
+  slidePath: 'ppt/slides/slide5.xml',
+  slideRelsPath: 'ppt/slides/_rels/slide5.xml.rels',
+  notesSlidePath: 'ppt/notesSlides/notesSlide8.xml',
+  notesSlideRelsPath: 'ppt/notesSlides/_rels/notesSlide8.xml.rels',
+  imagePath: 'ppt/media/image9.png',
+  slideText: 'Existing Slide Content',
+  notesText: 'Existing speaker notes for slide five.',
+  presentationRelId: 'rId20',
+};
+
+/**
+ * Builds on buildTemplateFixture() by adding one pre-existing content slide
+ * (with its own notes page and image), and gives it a deliberately
+ * high/gapped slide id (9999) and relationship id (rId20). Returns a
+ * Uint8Array, same contract as buildTemplateFixture().
+ */
+export async function buildTemplateFixtureWithExistingContent() {
+  const zip = await JSZip.loadAsync(await buildTemplateFixture());
+
+  zip.file(EXISTING_CONTENT.slidePath, EXISTING_SLIDE_XML);
+  zip.file(EXISTING_CONTENT.slideRelsPath, EXISTING_SLIDE_RELS);
+  zip.file(EXISTING_CONTENT.notesSlidePath, EXISTING_NOTES_SLIDE_XML);
+  zip.file(EXISTING_CONTENT.notesSlideRelsPath, EXISTING_NOTES_SLIDE_RELS);
+  zip.file(EXISTING_CONTENT.imagePath, EXISTING_IMAGE_BYTES);
+
+  const presentationXml = await zip.file('ppt/presentation.xml').async('string');
+  zip.file(
+    'ppt/presentation.xml',
+    presentationXml.replace(
+      '<p:sldIdLst/>',
+      `<p:sldIdLst><p:sldId id="${EXISTING_CONTENT.slideId}" r:id="${EXISTING_CONTENT.presentationRelId}"/></p:sldIdLst>`
+    )
+  );
+
+  const presentationRels = await zip.file('ppt/_rels/presentation.xml.rels').async('string');
+  zip.file(
+    'ppt/_rels/presentation.xml.rels',
+    presentationRels.replace(
+      '</Relationships>',
+      `<Relationship Id="${EXISTING_CONTENT.presentationRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide5.xml"/></Relationships>`
+    )
+  );
+
+  const ct = await zip.file('[Content_Types].xml').async('string');
+  zip.file(
+    '[Content_Types].xml',
+    ct.replace(
+      '</Types>',
+      '<Default Extension="png" ContentType="image/png"/>' +
+        `<Override PartName="/${EXISTING_CONTENT.slidePath}" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>` +
+        `<Override PartName="/${EXISTING_CONTENT.notesSlidePath}" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>` +
+        '</Types>'
+    )
+  );
+
+  return zip.generateAsync({ type: 'uint8array' });
+}

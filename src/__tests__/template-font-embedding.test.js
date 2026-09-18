@@ -71,10 +71,12 @@ function relationshipsXml(entries) {
 }
 
 function presentationXmlWith({ embeddedFontLstXml = '', extraAttrs = '' } = {}) {
+  // Child order follows CT_Presentation (ECMA-376 §19.2.1.26): sldMasterIdLst,
+  // notesMasterIdLst, handoutMasterIdLst, sldIdLst, sldSz, notesSz, ..., embeddedFontLst.
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="${R_NS}" xmlns:p="${P_NS}"${extraAttrs}>
 <p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst>
-<p:sldIdLst/>
 <p:notesMasterIdLst><p:notesMasterId r:id="rId2"/></p:notesMasterIdLst>
+<p:sldIdLst/>
 <p:sldSz cx="12192000" cy="6858000"/>
 <p:notesSz cx="6858000" cy="12192000"/>
 ${embeddedFontLstXml}</p:presentation>`;
