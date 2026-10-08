@@ -592,7 +592,18 @@ export async function mergeTemplate({ templateInfo, generatedZip, slideAssignmen
     const oldSlideRelsPath = `ppt/slides/_rels/slide${oldSlideNum}.xml.rels`;
     const newSlideRelsPath = `ppt/slides/_rels/slide${newSlideNum}.xml.rels`;
 
-    if (!generatedZip.file(oldSlidePath)) continue;
+    if (!generatedZip.file(oldSlidePath)) {
+      // `slideAssignments` is the caller's record of how many slides were
+      // generated; a missing part here means the intermediate PptxGenJS
+      // package is malformed (or `slideAssignments` doesn't actually match
+      // it). Silently skipping would merge fewer slides than the caller
+      // asked for with no indication anything went wrong.
+      throw new Error(
+        `dom-to-pptx: mergeTemplate() expected a generated slide at "${oldSlidePath}" (slideAssignments[${i}]) ` +
+          'but it is missing from generatedZip. The generated PPTX package may be malformed, or slideAssignments ' +
+          'does not match the number of slides it actually contains.'
+      );
+    }
 
     const resolvedLayout = resolveLayout(templateInfo, slideAssignments[i], defaultLayoutName);
 
@@ -621,6 +632,21 @@ export async function mergeTemplate({ templateInfo, generatedZip, slideAssignmen
           const oldAbs = resolveRelativeTarget('ppt/slides', target);
           const newAbs = await copyMedia(oldAbs);
           rel.setAttribute('Target', relativeTarget('ppt/slides', newAbs));
+        } else {
+          // Every other *internal* relationship type (chart, audio/video
+          // media, embedded package/worksheet, an internal hyperlink to
+          // another slide, ...) would need its target part copied into
+          // templateZip the same way slideLayout/notesSlide/image are
+          // above, which this function doesn't do. Continuing silently
+          // would leave the relationship pointing at a part that was never
+          // copied — a dangling reference that produces a corrupt-looking
+          // PPTX without any error, surfacing only if/when the renderer
+          // gains a feature that emits one of these. Fail loudly instead.
+          throw new Error(
+            `dom-to-pptx: slide ${oldSlideNum} has an internal relationship of type "${type}" ` +
+              `(target "${target}") that mergeTemplate() does not know how to carry into the template package. ` +
+              'Only slideLayout, notesSlide, and image relationships are currently supported for template merging.'
+          );
         }
       }
       templateZip.file(newSlideRelsPath, serializeXmlWithDeclaration(relsDoc));

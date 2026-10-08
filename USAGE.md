@@ -410,15 +410,17 @@ exportToPptx(elementOrSelector, options);
 
 ### Parameters
 
-| Parameter                | Type                             | Description                                   |
-| ------------------------ | -------------------------------- | --------------------------------------------- |
-| `elementOrSelector`      | `string \| HTMLElement \| Array` | DOM element or selector                       |
-| `options.fileName`       | `string`                         | Filename, defaults to `"export.pptx"`         |
-| `options.autoEmbedFonts` | `boolean`                        | Automatically embed fonts, defaults to `true` |
-| `options.fonts`          | `Array<{name, url}>`             | Manually specify fonts                        |
-| `options.skipDownload`   | `boolean`                        | Do not auto-download; return Blob             |
-| `options.svgAsVector`    | `boolean`                        | Preserve SVGs as vectors (default: `false`)   |
-| `options.listConfig`     | `object`                         | List style configuration                      |
+| Parameter                   | Type                                                                        | Description                                                                                                       |
+| --------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `elementOrSelector`         | `string \| HTMLElement \| Array<string \| HTMLElement \| {element, baseLayout}>` | DOM element, selector, or array of them. An array entry may instead be a `{element, baseLayout}` descriptor to pick which `options.template` layout that specific slide uses. |
+| `options.fileName`          | `string`                                                                      | Filename, defaults to `"export.pptx"`                                                                             |
+| `options.autoEmbedFonts`    | `boolean`                                                                     | Automatically embed fonts, defaults to `true`                                                                     |
+| `options.fonts`             | `Array<{name, url}>`                                                         | Manually specify fonts                                                                                            |
+| `options.skipDownload`      | `boolean`                                                                     | Do not auto-download; return Blob                                                                                 |
+| `options.svgAsVector`       | `boolean`                                                                     | Preserve SVGs as vectors (default: `false`)                                                                       |
+| `options.listConfig`        | `object`                                                                      | List style configuration                                                                                          |
+| `options.template`          | `string \| ArrayBuffer \| Uint8Array \| Blob`                                | Base the export on an existing `.pptx` so slides inherit its real slideLayout/master background. See [Template Support](docs/template-support.md). |
+| `options.defaultBaseLayout` | `string`                                                                      | Layout name (from `options.template`) used for any slide that doesn't set its own `baseLayout`. Falls back to the template's first declared layout if omitted. |
 
 ### Returns
 

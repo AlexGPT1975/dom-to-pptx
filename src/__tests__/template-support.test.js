@@ -4,7 +4,7 @@
 // an existing .pptx so they inherit its real slideLayout/slideMaster
 // background instead of PptxGenJS's own generated blank layout. See
 // docs/template-support.md for the feature writeup.
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import JSZip from 'jszip';
 import { exportToPptx, getTemplateLayouts } from '../index.js';
 import { readTemplate, resolveLayout, mergeTemplate } from '../template.js';
@@ -273,10 +273,13 @@ describe('template support', () => {
       expect(info.notesMasterId).toBe('ppt/notesMasters/notesMaster7.xml');
 
       const slide = makeSlide({ label: 'notes-declared', color: '#221100', notes: 'Speaker notes for slide one.' });
-      const blob = await exportToPptx({ element: slide, baseLayout: 'Content Light' }, {
-        template: bytes,
-        skipDownload: true,
-      });
+      const blob = await exportToPptx(
+        { element: slide, baseLayout: 'Content Light' },
+        {
+          template: bytes,
+          skipDownload: true,
+        }
+      );
       const outZip = await JSZip.loadAsync(Buffer.from(await blob.arrayBuffer()));
 
       const notesSlideRelsPath = Object.keys(outZip.files).find((p) =>
@@ -517,9 +520,9 @@ describe('template support', () => {
       const sldIds = elementsByLocalName(presDoc, 'sldId');
       expect(sldIds).toHaveLength(3);
       expect(sldIds[0].getAttribute('id')).toBe(EXISTING_CONTENT.slideId); // existing slide stayed first
-      expect(sldIds[0].getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships', 'id')).toBe(
-        EXISTING_CONTENT.presentationRelId
-      );
+      expect(
+        sldIds[0].getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships', 'id')
+      ).toBe(EXISTING_CONTENT.presentationRelId);
       const newIds = [sldIds[1], sldIds[2]].map((n) => parseInt(n.getAttribute('id'), 10));
       expect(new Set([...newIds, parseInt(EXISTING_CONTENT.slideId, 10)]).size).toBe(3); // all unique
       newIds.forEach((id) => expect(id).toBeGreaterThan(parseInt(EXISTING_CONTENT.slideId, 10)));
@@ -749,7 +752,9 @@ describe('template support', () => {
       // New image landed past the template's existing image9.png, and the
       // new slide's image relationship points at it.
       expect(zip.file('ppt/media/image10.png')).not.toBeNull();
-      const imageRel = elementsByLocalName(relsSlide6, 'Relationship').find((r) => r.getAttribute('Type').endsWith('/image'));
+      const imageRel = elementsByLocalName(relsSlide6, 'Relationship').find((r) =>
+        r.getAttribute('Type').endsWith('/image')
+      );
       expect(imageRel.getAttribute('Target')).toBe('../media/image10.png');
 
       // Both font variants embedded under one family.
@@ -766,6 +771,121 @@ describe('template support', () => {
       const sldIds = elementsByLocalName(presDoc, 'sldId').map((n) => parseInt(n.getAttribute('id'), 10));
       expect(sldIds).toHaveLength(3);
       expect(new Set(sldIds).size).toBe(3);
+    });
+  });
+
+  // Maintainer review (PR #67, atharva9167j, 2026-10-02): with both
+  // `template` and `layout` set, PptxGenJS rendered shapes against the
+  // named `layout` preset's coordinate space, but mergeTemplate() always
+  // preserves the *template's* own real <p:sldSz> in the final package —
+  // a silent canvas-size mismatch. The template's real size must win
+  // (src/index.js), since a named preset essentially never matches an
+  // arbitrary template's actual declared size.
+  describe('exportToPptx({ template, layout }) conflict — template size wins (maintainer review, 2026-10-02)', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('ignores options.layout in favor of the template size when both are provided, and warns', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const slide = makeSlide({ label: 'layout-template-conflict', color: '#101010' });
+
+      const blob = await exportToPptx(slide, {
+        template: templateBytes,
+        layout: 'LAYOUT_16x10', // PptxGenJS's own built-in 10in x 6.25in — deliberately NOT the template's 13.333x7.5in
+        skipDownload: true,
+      });
+      const zip = await JSZip.loadAsync(Buffer.from(await blob.arrayBuffer()));
+      const presDoc = await parseXml(zip, 'ppt/presentation.xml');
+      const sldSz = elementsByLocalName(presDoc, 'sldSz')[0];
+      // Template's real size (13.333x7.5in), not LAYOUT_16x10's 10x6.25in.
+      expect(sldSz.getAttribute('cx')).toBe('12192000');
+      expect(sldSz.getAttribute('cy')).toBe('6858000');
+
+      const warnedAboutConflict = warnSpy.mock.calls.some(
+        (args) => String(args[0]).includes('options.layout') && String(args[0]).includes('template')
+      );
+      expect(warnedAboutConflict).toBe(true);
+    });
+
+    it('still applies options.layout normally when no template is set (regression)', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const slide = makeSlide({ label: 'layout-no-template', color: '#202020' });
+
+      const blob = await exportToPptx(slide, { layout: 'LAYOUT_16x10', skipDownload: true });
+      const zip = await JSZip.loadAsync(Buffer.from(await blob.arrayBuffer()));
+      const presDoc = await parseXml(zip, 'ppt/presentation.xml');
+      const sldSz = elementsByLocalName(presDoc, 'sldSz')[0];
+      expect(sldSz.getAttribute('cx')).toBe('9144000'); // 10in
+      expect(sldSz.getAttribute('cy')).toBe('5715000'); // 6.25in
+
+      const warnedAboutConflict = warnSpy.mock.calls.some((args) => String(args[0]).includes('options.layout'));
+      expect(warnedAboutConflict).toBe(false);
+    });
+  });
+
+  // Maintainer review (PR #67, atharva9167j, 2026-10-02): the per-slide rels
+  // loop in mergeTemplate() only rewrites slideLayout/notesSlide/image
+  // relationships; any other internal relationship type (chart, embedded
+  // media, ...) was copied into the new slide's .rels unchanged while its
+  // target part was never copied into the template zip — a silent dangling
+  // relationship. This must fail loudly instead.
+  describe('mergeTemplate() fails loudly on an internal relationship it cannot carry over (maintainer review, 2026-10-02)', () => {
+    it('throws rather than leaving a dangling relationship for an unsupported internal relationship type', async () => {
+      const R_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+      const templateInfo = await readTemplate(await buildTemplateFixture());
+
+      const generatedZip = new JSZip();
+      generatedZip.file(
+        '[Content_Types].xml',
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/></Types>`
+      );
+      generatedZip.file(
+        'ppt/slides/slide1.xml',
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="${R_NS}" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld></p:sld>`
+      );
+      // A chart relationship: its target part (ppt/charts/chart1.xml) is
+      // never created here, simulating a hypothetical future renderer
+      // feature mergeTemplate() doesn't yet know how to carry over.
+      generatedZip.file(
+        'ppt/slides/_rels/slide1.xml.rels',
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${R_NS}/slideLayout" Target="../slideLayouts/slideLayoutPLACEHOLDER.xml"/><Relationship Id="rId2" Type="${R_NS}/chart" Target="../charts/chart1.xml"/></Relationships>`
+      );
+
+      await expect(mergeTemplate({ templateInfo, generatedZip, slideAssignments: ['Content Light'] })).rejects.toThrow(
+        /internal relationship of type ".*chart.*"/
+      );
+    });
+  });
+
+  // Maintainer review (PR #67, atharva9167j, 2026-10-02): mergeTemplate()
+  // silently `continue`d past a slideAssignments entry with no matching
+  // generatedZip slide, producing fewer merged slides than requested with
+  // no indication anything was wrong. A malformed intermediate package (or
+  // a slideAssignments/generatedZip mismatch) must fail loudly instead.
+  describe('mergeTemplate() fails loudly when a requested slide is missing from generatedZip (maintainer review, 2026-10-02)', () => {
+    it('throws instead of silently producing fewer slides than slideAssignments requested', async () => {
+      const R_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+      const templateInfo = await readTemplate(await buildTemplateFixture());
+
+      const generatedZip = new JSZip();
+      generatedZip.file(
+        '[Content_Types].xml',
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/></Types>`
+      );
+      generatedZip.file(
+        'ppt/slides/slide1.xml',
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="${R_NS}" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld></p:sld>`
+      );
+      generatedZip.file(
+        'ppt/slides/_rels/slide1.xml.rels',
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${R_NS}/slideLayout" Target="../slideLayouts/slideLayoutPLACEHOLDER.xml"/></Relationships>`
+      );
+      // Deliberately no slide2.xml, while slideAssignments below claims two slides were generated.
+
+      await expect(
+        mergeTemplate({ templateInfo, generatedZip, slideAssignments: ['Content Light', 'Section Dark'] })
+      ).rejects.toThrow(/expected a generated slide at "ppt\/slides\/slide2\.xml"/);
     });
   });
 });

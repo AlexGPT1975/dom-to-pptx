@@ -17,12 +17,19 @@
 // runExporter() itself is exercised with a controlled exporter stub
 // (`deps.loadExporter`) and a captured `deps.exit`, so these tests never
 // launch a real headless browser.
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeAll, afterAll } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import JSZip from 'jszip';
-import { runExporter, resolveSlideSizeOptions, computeSizeMismatch, parseArgs } from '../../bin/cli-exporter-core.js';
+import {
+  runExporter,
+  resolveSlideSizeOptions,
+  computeSizeMismatch,
+  resolveTemplateSldSzInches,
+  parseArgs,
+} from '../../bin/cli-exporter-core.js';
+import { buildTemplateFixture, FIXTURE_SLDSZ_IN } from './fixtures/build-template-fixture.js';
 
 async function buildFakePptxBuffer(widthIn, heightIn) {
   const zip = new JSZip();
@@ -60,7 +67,9 @@ describe('resolveSlideSizeOptions', () => {
   });
 
   it('is not fooled by both dimensions being explicit alongside a template', () => {
-    const r = resolveSlideSizeOptions(parseArgs(['slides.html', '--template', 'corp.pptx', '--width', '13.333', '--height', '7.5']));
+    const r = resolveSlideSizeOptions(
+      parseArgs(['slides.html', '--template', 'corp.pptx', '--width', '13.333', '--height', '7.5'])
+    );
     expect(r.sizeFromTemplate).toBe(false);
     expect(r.forceExplicitSize).toBe(true);
   });
@@ -101,6 +110,49 @@ describe('computeSizeMismatch', () => {
       effectiveHeight: 7.5,
     });
     expect(result.hasMismatch).toBe(false);
+  });
+});
+
+// Maintainer review (PR #67, atharva9167j, 2026-10-02): sizeFromTemplate
+// correctly stopped the 10x5.625in defaults from overriding the *exported
+// PPTX's* coordinate space, but the headless-browser *viewport* was still
+// sized from those same defaults before the template was ever inspected —
+// for a non-16:9 template, Puppeteer would render the page at the wrong
+// aspect ratio. resolveTemplateSldSzInches() resolves the template's real
+// size up front (Node-side, via JSZip — no DOMParser/browser needed here).
+describe('resolveTemplateSldSzInches (maintainer review, 2026-10-02: template-aware CLI viewport)', () => {
+  let tmpDir;
+  let templatePath;
+
+  beforeAll(async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dom-to-pptx-cli-template-test-'));
+    templatePath = path.join(tmpDir, 'corp-template.pptx');
+    fs.writeFileSync(templatePath, await buildTemplateFixture());
+  });
+
+  afterAll(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('reads the real declared slide size from a local template file', async () => {
+    const size = await resolveTemplateSldSzInches(templatePath);
+    expect(size).not.toBeNull();
+    expect(size.width).toBeCloseTo(FIXTURE_SLDSZ_IN.width, 4);
+    expect(size.height).toBeCloseTo(FIXTURE_SLDSZ_IN.height, 4);
+  });
+
+  it('returns null for a URL rather than trying to read it as a local path', async () => {
+    expect(await resolveTemplateSldSzInches('https://example.invalid/corp.pptx')).toBeNull();
+  });
+
+  it('returns null (rather than throwing) for a nonexistent local path', async () => {
+    expect(await resolveTemplateSldSzInches(path.join(tmpDir, 'does-not-exist.pptx'))).toBeNull();
+  });
+
+  it('returns null (rather than throwing) for a path that is not a valid .pptx/zip', async () => {
+    const badPath = path.join(tmpDir, 'not-a-pptx.pptx');
+    fs.writeFileSync(badPath, 'this is not a zip file');
+    expect(await resolveTemplateSldSzInches(badPath)).toBeNull();
   });
 });
 
@@ -151,10 +203,10 @@ describe('runExporter (stubbed exporter, no real browser)', () => {
     const stubExporter = vi.fn(async () => buildFakePptxBuffer(13.333333, 7.5));
     const exit = vi.fn();
 
-    await runExporter(
-      [htmlPath, '--template', 'corp.pptx', '--width', '13.333333', '--height', '7.5'],
-      { loadExporter: async () => stubExporter, exit }
-    );
+    await runExporter([htmlPath, '--template', 'corp.pptx', '--width', '13.333333', '--height', '7.5'], {
+      loadExporter: async () => stubExporter,
+      exit,
+    });
 
     expect(allLoggedText(warnSpy)).not.toContain('differ from');
     expect(exit).toHaveBeenCalledWith(0);
@@ -192,6 +244,46 @@ describe('runExporter (stubbed exporter, no real browser)', () => {
     expect(exporterOptions.pptxOptions.width).toBe(8);
     expect(exporterOptions.pptxOptions.height).toBe(5.625);
     expect(allLoggedText(warnSpy)).not.toContain('differ from');
+    expect(exit).toHaveBeenCalledWith(0);
+  });
+
+  it('sizes the headless-browser viewport from the template’s real declared size, not the 1920x1080 default', async () => {
+    setup();
+    const templatePath = path.join(tmpDir, 'corp-template.pptx');
+    fs.writeFileSync(templatePath, await buildTemplateFixture());
+    const stubExporter = vi.fn(async () => buildFakePptxBuffer(FIXTURE_SLDSZ_IN.width, FIXTURE_SLDSZ_IN.height));
+    const exit = vi.fn();
+
+    await runExporter([htmlPath, '--template', templatePath], { loadExporter: async () => stubExporter, exit });
+
+    const [, exporterOptions] = stubExporter.mock.calls[0];
+    expect(exporterOptions.browserWidth).toBe(Math.round(FIXTURE_SLDSZ_IN.width * 192));
+    expect(exporterOptions.browserHeight).toBe(Math.round(FIXTURE_SLDSZ_IN.height * 192));
+    // Sanity: the fixture's aspect ratio actually differs from the 10x5.625in default (1920x1080).
+    expect(exporterOptions.browserWidth).not.toBe(1920);
+    expect(exporterOptions.browserHeight).not.toBe(1080);
+
+    // The pre-export display now shows the real resolved size rather than the vague placeholder.
+    expect(allLoggedText(logSpy)).toContain('from --template');
+    expect(allLoggedText(warnSpy)).not.toContain('differ from');
+    expect(exit).toHaveBeenCalledWith(0);
+  });
+
+  it('still honors an explicit --browser-width/--browser-height over the resolved template size', async () => {
+    setup();
+    const templatePath = path.join(tmpDir, 'corp-template.pptx');
+    fs.writeFileSync(templatePath, await buildTemplateFixture());
+    const stubExporter = vi.fn(async () => buildFakePptxBuffer(FIXTURE_SLDSZ_IN.width, FIXTURE_SLDSZ_IN.height));
+    const exit = vi.fn();
+
+    await runExporter([htmlPath, '--template', templatePath, '--browser-width', '1280', '--browser-height', '800'], {
+      loadExporter: async () => stubExporter,
+      exit,
+    });
+
+    const [, exporterOptions] = stubExporter.mock.calls[0];
+    expect(exporterOptions.browserWidth).toBe(1280);
+    expect(exporterOptions.browserHeight).toBe(800);
     expect(exit).toHaveBeenCalledWith(0);
   });
 

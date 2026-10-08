@@ -185,6 +185,45 @@ function computeSizeMismatch({ explicitWidth, explicitHeight, slideWidth, slideH
   return { widthMismatch, heightMismatch, hasMismatch: widthMismatch || heightMismatch };
 }
 
+/**
+ * Best-effort, Node-side read of a local `--template` file's own declared
+ * `<p:sldSz>`, so the CLI can size its headless-browser viewport (and its
+ * pre-export display) to match the template before the export even starts.
+ * Without this, `sizeFromTemplate` correctly stops the 10x5.625in defaults
+ * from overriding the *exported PPTX's* coordinate space, but the
+ * *viewport* Puppeteer renders into was still being sized from those same
+ * defaults — for a 4:3 or other non-16:9 template, the page would be
+ * rendered at the wrong aspect ratio before dom-to-pptx ever gets a chance
+ * to adopt the template's real size for the PPTX itself.
+ *
+ * Mirrors the same regex-based `<p:sldSz>` extraction already used below to
+ * report the *effective* size after export, rather than pulling in a DOM
+ * parser — this file runs in plain Node, outside the browser/jsdom context
+ * src/template.js assumes. Returns `null` (never throws) for a remote URL,
+ * a missing/unreadable file, or a template with no parseable `<p:sldSz>` —
+ * the real export path still resolves and reports those cases properly on
+ * its own; this is purely a best-effort improvement to the CLI's own
+ * pre-export viewport and display.
+ */
+async function resolveTemplateSldSzInches(templatePath) {
+  if (typeof templatePath !== 'string' || /^https?:\/\//i.test(templatePath)) return null;
+  try {
+    if (!fs.existsSync(templatePath)) return null;
+    const zip = await JSZip.loadAsync(fs.readFileSync(templatePath));
+    const presFile = zip.file('ppt/presentation.xml');
+    if (!presFile) return null;
+    const xmlStr = await presFile.async('string');
+    const sldSzMatch = xmlStr.match(/<[a-zA-Z0-9:]*sldSz\s+([^>]+)>/);
+    if (!sldSzMatch) return null;
+    const cxMatch = sldSzMatch[1].match(/cx=["'](\d+)["']/);
+    const cyMatch = sldSzMatch[1].match(/cy=["'](\d+)["']/);
+    if (!cxMatch || !cyMatch) return null;
+    return { width: parseInt(cxMatch[1], 10) / 914400, height: parseInt(cyMatch[1], 10) / 914400 };
+  } catch {
+    return null; // best-effort only — never block the export over this
+  }
+}
+
 async function defaultLoadExporter() {
   const distPath = path.resolve(__dirname, '..', 'dist', 'dom-to-pptx-node.mjs');
   const srcPath = path.resolve(__dirname, '..', 'src', 'node-exporter.js');
@@ -246,8 +285,21 @@ async function runExporter(argv, deps = {}) {
   const outputPath = args.output ? path.resolve(args.output) : defaultOutput;
 
   // Resolve slide and browser dimensions using script scale (PPI = 192)
-  const { slideWidth, slideHeight, explicitWidth, explicitHeight, browserWidth, browserHeight, sizeFromTemplate, forceExplicitSize } =
+  let { slideWidth, slideHeight, explicitWidth, explicitHeight, browserWidth, browserHeight, sizeFromTemplate, forceExplicitSize } =
     resolveSlideSizeOptions(args);
+
+  // When the final size will come entirely from --template, resolve its
+  // real declared size up front so the viewport (and the pre-export
+  // display below) reflects it too, instead of staying pinned to the
+  // 10x5.625in defaults for a template with a different aspect ratio.
+  let templateSldSz = null;
+  if (sizeFromTemplate) {
+    templateSldSz = await resolveTemplateSldSzInches(args.template);
+    if (templateSldSz) {
+      browserWidth = args.browserWidth || Math.round(templateSldSz.width * 192);
+      browserHeight = args.browserHeight || Math.round(templateSldSz.height * 192);
+    }
+  }
 
   // Build options for node-exporter
   const exporterOptions = {
@@ -278,8 +330,11 @@ async function runExporter(argv, deps = {}) {
   console.log(`${c.bold}Exporting:${c.reset}      ${c.cyan}${resolvedInput}${c.reset}`);
   console.log(`${c.bold}Output:    ${c.reset}      ${c.green}${outputPath}${c.reset}`);
   if (sizeFromTemplate) {
+    const sizeLabel = templateSldSz
+      ? `${c.yellow}${parseFloat(templateSldSz.width.toFixed(6))}" x ${parseFloat(templateSldSz.height.toFixed(6))}"${c.reset} ${c.dim}(from --template)${c.reset}`
+      : `${c.dim}(adopted from --template)${c.reset}`;
     console.log(
-      `${c.bold}Slide Dimensions:${c.reset} ${c.dim}(adopted from --template)${c.reset} (Viewport: ${c.yellow}${browserWidth}px x ${browserHeight}px${c.reset})`
+      `${c.bold}Slide Dimensions:${c.reset} ${sizeLabel} (Viewport: ${c.yellow}${browserWidth}px x ${browserHeight}px${c.reset})`
     );
   } else {
     console.log(
@@ -405,4 +460,4 @@ async function runExporter(argv, deps = {}) {
 }
 
 
-export { runExporter, resolveSlideSizeOptions, computeSizeMismatch, parseArgs };
+export { runExporter, resolveSlideSizeOptions, computeSizeMismatch, resolveTemplateSldSzInches, parseArgs };

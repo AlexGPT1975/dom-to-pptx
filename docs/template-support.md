@@ -72,10 +72,16 @@ await exportToPptx(
 - `options.template` — a URL string (fetched with `fetch`), or raw bytes (`ArrayBuffer` / `Uint8Array` / `Blob`). `exportToPptx` always runs inside a browser/jsdom/puppeteer-page context, so it has no filesystem access; see **Node / CLI usage** below for local file paths.
 - `options.defaultBaseLayout` — layout name applied to any slide that didn't specify `baseLayout`.
 
-Optional introspection helper (only implemented because it was nearly free once `readTemplate` existed):
+Optional introspection helper (only implemented because it was nearly free once `readTemplate` existed). Unlike `exportToPptx` via the CLI/`node-exporter.js` (which reads a local `template` file path on the Node side and forwards its bytes into the page — see **Node / CLI usage** below), `getTemplateLayouts()` has **no** Node-side local-file conversion of its own: a string is always passed straight to `fetch()`. From a browser/jsdom/puppeteer-page context, a relative path resolves against the page's own origin like any other `fetch()` call; from a plain Node script, `fetch()` can't read the local filesystem at all, so pass bytes directly instead:
 
 ```js
-const layouts = await getTemplateLayouts('./corporate-template.pptx');
+import { readFileSync } from 'fs';
+import { getTemplateLayouts } from 'dom-to-pptx';
+
+// In plain Node, read the file yourself — getTemplateLayouts() accepts raw
+// bytes (ArrayBuffer/Uint8Array/Blob) directly, and a Node Buffer is a
+// Uint8Array, so no conversion beyond fs.readFileSync() is needed.
+const layouts = await getTemplateLayouts(readFileSync('./corporate-template.pptx'));
 // [{ id: 'ppt/slideLayouts/slideLayout1.xml', name: 'Content Light' },
 //  { id: 'ppt/slideLayouts/slideLayout2.xml', name: 'Section Dark' }]
 ```
@@ -92,7 +98,14 @@ Internally, `readTemplate()` resolves each layout's name to its **part path** on
 
 ## Slide size
 
-When `template` is set and the caller didn't pass an explicit `width`/`height` (or `layout`), the export automatically adopts the template's own declared `<p:sldSz>` for all coordinate math. This isn't cosmetic: the template's `presentation.xml` — including its real `sldSz` — is preserved as-is by the merge, so if dom-to-pptx computed shape positions against a _different_ canvas size, shapes would land at the wrong scale relative to the real background. An explicit `options.width`/`options.height` still takes priority if you deliberately want a mismatch.
+When `template` is set, the export automatically adopts the template's own declared `<p:sldSz>` for all coordinate math. This isn't cosmetic: the template's `presentation.xml` — including its real `sldSz` — is preserved as-is by the merge, so if dom-to-pptx computed shape positions against a _different_ canvas size, shapes would land at the wrong scale relative to the real background.
+
+Priority, highest first:
+
+1. Explicit `options.width` + `options.height` — a deliberate, unambiguous numeric override. Use this if you intentionally want the rendered coordinate space to differ from the template's own size.
+2. The template's own `sldSz`, when `template` is set.
+3. `options.layout` (a named PptxGenJS preset such as `LAYOUT_WIDE`) — only consulted when there is no `template`. A named preset is a coarse guess that essentially never matches an arbitrary template's actual declared size, so (unlike explicit `width`/`height`) it is **not** treated as a deliberate override: with both `template` and `layout` set, `layout` is ignored (with a console warning) in favor of the template's real size, because `mergeTemplate()` always preserves that real `<p:sldSz>` in the final package regardless of what coordinate space PptxGenJS rendered into.
+4. Otherwise, size is auto-detected from the first slide element's aspect ratio.
 
 ## Default layout (no `baseLayout` given)
 

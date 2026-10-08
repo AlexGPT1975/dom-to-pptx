@@ -4,7 +4,13 @@
 // shebang above never has to survive being parsed by a JS module bundler —
 // tests (and any other consumer that wants to import the CLI's exports
 // directly) import cli-exporter-core.js instead.
-export { runExporter, resolveSlideSizeOptions, computeSizeMismatch, parseArgs } from './cli-exporter-core.js';
+export {
+  runExporter,
+  resolveSlideSizeOptions,
+  computeSizeMismatch,
+  resolveTemplateSldSzInches,
+  parseArgs,
+} from './cli-exporter-core.js';
 import { runExporter } from './cli-exporter-core.js';
 
 const isMain =

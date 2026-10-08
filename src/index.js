@@ -97,6 +97,31 @@ export async function exportToPptx(target, options = {}) {
     pptx.layout = 'CUSTOM';
     finalWidth = options.width;
     finalHeight = options.height;
+  } else if (templateInfo && templateInfo.sldSz) {
+    // Checked ahead of `options.layout`: mergeTemplate() always preserves
+    // the template's own <p:sldSz> untouched in the final package, so if a
+    // named `layout` preset (a coarse, generic guess) won the coordinate
+    // space here instead, shapes would be positioned for one canvas size
+    // while PowerPoint renders the merged slide at another. Only an
+    // explicit numeric `options.width`/`options.height` above is treated
+    // as a deliberate, unambiguous override of the template's size.
+    if (options.layout) {
+      console.warn(
+        `dom-to-pptx: \`options.layout\` ("${options.layout}") was provided together with \`template\` — ignoring ` +
+          "it in favor of the template's own declared slide size, since the final PPTX always keeps the " +
+          "template's real <p:sldSz>. Pass explicit `options.width`/`options.height` instead if you deliberately " +
+          'want the rendered coordinate space to differ from the template.'
+      );
+    }
+    // Match the template's own declared slide size so shapes line up 1:1
+    // with the real master/layout background it provides. This only
+    // determines the coordinate space PptxGenJS renders into here — the
+    // template's presentation.xml (and its actual <p:sldSz>) is preserved
+    // untouched by the merge step later on.
+    pptx.defineLayout({ name: 'TEMPLATE', width: templateInfo.sldSz.width, height: templateInfo.sldSz.height });
+    pptx.layout = 'TEMPLATE';
+    finalWidth = templateInfo.sldSz.width;
+    finalHeight = templateInfo.sldSz.height;
   } else if (options.layout) {
     pptx.layout = options.layout;
     // Map standard layouts for internal scale calculation if possible,
@@ -111,16 +136,6 @@ export async function exportToPptx(target, options = {}) {
       finalWidth = 13.3;
       finalHeight = 7.5;
     }
-  } else if (templateInfo && templateInfo.sldSz) {
-    // Match the template's own declared slide size so shapes line up 1:1
-    // with the real master/layout background it provides. This only
-    // determines the coordinate space PptxGenJS renders into here — the
-    // template's presentation.xml (and its actual <p:sldSz>) is preserved
-    // untouched by the merge step later on.
-    pptx.defineLayout({ name: 'TEMPLATE', width: templateInfo.sldSz.width, height: templateInfo.sldSz.height });
-    pptx.layout = 'TEMPLATE';
-    finalWidth = templateInfo.sldSz.width;
-    finalHeight = templateInfo.sldSz.height;
   } else {
     const firstEl = Array.isArray(target) ? target[0] : target;
     const root = typeof firstEl === 'string' ? document.querySelector(firstEl) : firstEl;
